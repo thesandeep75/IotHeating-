@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>🌍 IoT Tanker Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<!-- Leaflet CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+<!-- Bootstrap CSS -->
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+
+<!-- Leaflet JS FIRST -->
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<!-- Leaflet AntPath AFTER Leaflet -->
+<script src="https://unpkg.com/leaflet-ant-path/dist/leaflet-ant-path.min.js"></script>
+
+<!-- Any other Leaflet plugins -->
+<script src="https://unpkg.com/leaflet.curve/leaflet.curve.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet-ant-path/dist/leaflet-ant-path.min.js"></script>
+
+<!-- Bootstrap Bundle -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<style>
+  body {
+    background: #f4f6fc;
+    font-family: "Roboto", sans-serif;
+  }
+  #map {
+    height: 500px;
+    border-radius: 0.75rem;
+  }
+  .card {
+    border: none;
+    border-radius: 1rem;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    background: #fff;
+  }
+  .table-hover tbody tr:hover {
+    background-color: #edf1f5;
+    transition: background 0.3s ease;
+  }
+  .table-hover tbody tr.active-row {
+    background-color: #dbeafe;
+  }
+  .alert-section {
+    display: none;
+    transition: opacity 0.3s ease;
+  }
+  .pulse {
+    box-shadow: 0 0 0 rgba(220,53,69,0.4);
+    animation: pulse-animation 2s infinite;
+  }
+  @keyframes pulse-animation {
+    0% { box-shadow: 0 0 0 0 rgba(220,53,69,0.4); }
+    70% { box-shadow: 0 0 0 10px rgba(220,53,69,0); }
+    100% { box-shadow: 0 0 0 0 rgba(220,53,69,0); }
+  }
+  .badge-temp {
+    font-weight: 500;
+  }
+  .badge-normal { background-color: #0d6efd; }
+  .badge-warn { background-color: #fd7e14; }
+  .badge-high { background-color: #dc3545; }
+</style>
+</head>
+<body>
+<div class="container py-4">
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h2 class="fw-semibold">🌍 IoT Tanker Dashboard</h2>
+    <button id="alertBell" type="button" class="btn btn-outline-danger position-relative" onclick="showPendingAlerts()">
+      🔔
+      <span id="alertCount" class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
+        0
+      </span>
+    </button>
+  </div>
+  <div class="row g-3">
+    <div class="col-lg-8">
+      <div id="map"></div>
+    </div>
+    <div class="col-lg-4 d-flex flex-column gap-3">
+      <div class="card p-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h5 id="tableTitle">All Tankers</h5>
+          <div class="d-flex gap-2">
+            <select id="sortSelect" class="form-select form-select-sm">
+              <option value="">Sort</option>
+              <option value="asc">Temp ↑</option>
+              <option value="desc">Temp ↓</option>
+            </select>
+            <select id="filterSelect" class="form-select form-select-sm">
+              <option value="">All Destinations</option>
+              <option value="rotterdam">Rotterdam</option>
+              <option value="singapore">Singapore</option>
+              <option value="mumbai">Mumbai</option>
+              <option value="shanghai">Shanghai</option>
+            </select>
+          </div>
+        </div>
+        <table class="table table-hover">
+          <thead class="table-light sticky-top">
+            <tr><th>ID</th><th>From</th><th>To</th><th>Temp</th></tr>
+          </thead>
+          <tbody id="tankerTable"></tbody>
+        </table>
+      </div>
+      <div id="alertSection" class="card p-3 alert-section bg-danger text-white">
+        <h5>⚠️ High Temperature Alert!</h5>
+        <p id="alertMessage"></p>
+        <button class="btn btn-light btn-sm" onclick="markReviewed()">Mark as Reviewed</button>
+      </div>
+      <div class="card p-3">
+        <h6 class="mb-2">Alert Log</h6>
+        <ul id="alertLog" class="mb-0 small"></ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="tankModal" tabindex="-1" aria-labelledby="tankModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content border-0 shadow-sm">
+      <div class="modal-header bg-primary text-white">
+        <h5 class="modal-title" id="tankModalLabel">Tanker Details</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="tankModalBody"></div>
+    </div>
+  </div>
+</div>
+
+<audio id="alertSound" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg"></audio>
+
+<script>
+const ports = {
+  houston: [29.76, -95.36],
+  rotterdam: [51.92, 4.47],
+  singapore: [1.35, 103.82],
+  mumbai: [19.07, 72.87],
+  shanghai: [31.23, 121.47]
+};
+
+let tankers = [
+  // Houston
+  {id:"H001", from:"houston", to:"rotterdam", temp:35, heating:true, history:[35], path:[[29.76,-95.36],[40,-40],[51.92,4.47]]},
+  {id:"H002", from:"houston", to:"singapore", temp:37, heating:true, history:[37], path:[[29.76,-95.36],[10,40],[1.35,103.82]]},
+  {id:"H003", from:"houston", to:"mumbai", temp:36, heating:true, history:[36], path:[[29.76,-95.36],[15,20],[19.07,72.87]]},
+  {id:"H004", from:"houston", to:"shanghai", temp:38, heating:true, history:[38], path:[[29.76,-95.36],[25,80],[31.23,121.47]]},
+ 
+  // Rotterdam
+  {id:"R001", from:"rotterdam", to:"houston", temp:40, heating:true, history:[40], path:[[51.92,4.47],[40,-40],[29.76,-95.36]]},
+  {id:"R002", from:"rotterdam", to:"singapore", temp:42, heating:true, history:[42], path:[[51.92,4.47],[20,40],[1.35,103.82]]},
+  {id:"R003", from:"rotterdam", to:"mumbai", temp:45, heating:true, history:[45], path:[[51.92,4.47],[30,20],[19.07,72.87]]},
+  {id:"R004", from:"rotterdam", to:"shanghai", temp:44, heating:true, history:[44], path:[[51.92,4.47],[35,80],[31.23,121.47]]},
+ 
+  // Mumbai
+  {id:"M001", from:"mumbai", to:"houston", temp:50, heating:true, history:[50], path:[[19.07,72.87],[0,0],[29.76,-95.36]]},
+  {id:"M002", from:"mumbai", to:"rotterdam", temp:48, heating:true, history:[48], path:[[19.07,72.87],[20,20],[51.92,4.47]]},
+  {id:"M003", from:"mumbai", to:"singapore", temp:46, heating:true, history:[46], path:[[19.07,72.87],[10,40],[1.35,103.82]]},
+  {id:"M004", from:"mumbai", to:"shanghai", temp:47, heating:true, history:[47], path:[[19.07,72.87],[20,110],[31.23,121.47]]},
+ 
+  // Singapore
+  {id:"S001", from:"singapore", to:"houston", temp:39, heating:true, history:[39], path:[[1.35,103.82],[10,0],[29.76,-95.36]]},
+  {id:"S002", from:"singapore", to:"rotterdam", temp:41, heating:true, history:[41], path:[[1.35,103.82],[20,20],[51.92,4.47]]},
+  {id:"S003", from:"singapore", to:"mumbai", temp:43, heating:true, history:[43], path:[[1.35,103.82],[15,30],[19.07,72.87]]},
+  {id:"S004", from:"singapore", to:"shanghai", temp:38, heating:true, history:[38], path:[[1.35,103.82],[20,110],[31.23,121.47]]},
+ 
+  // Shanghai
+  {id:"SH001", from:"shanghai", to:"houston", temp:36, heating:true, history:[36], path:[[31.23,121.47],[20,0],[29.76,-95.36]]},
+  {id:"SH002", from:"shanghai", to:"rotterdam", temp:39, heating:true, history:[39], path:[[31.23,121.47],[20,20],[51.92,4.47]]},
+  {id:"SH003", from:"shanghai", to:"mumbai", temp:41, heating:true, history:[41], path:[[31.23,121.47],[25,30],[19.07,72.87]]},
+  {id:"SH004", from:"shanghai", to:"singapore", temp:37, heating:true, history:[37], path:[[31.23,121.47],[25,50],[1.35,103.82]]}
+];
+ 
+
+let map = L.map("map").setView([20,0],2);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+
+let activeRoute = null;
+let portMarkers = {};
+let currentFilter = null;
+let selectedId = null;
+let reviewedIds = new Set();
+
+function updatePortMarkers(){
+  Object.entries(ports).forEach(([key,coords])=>{
+    const hasHigh = tankers.some(t=>t.from===key && t.temp>=50);
+    const iconHtml = `
+      <div style="position:relative;display:flex;align-items:center;justify-content:center;">
+        <div style="
+          background-color:${hasHigh?'#dc3545':'#0d6efd'};
+          width:16px;height:16px;border-radius:50%;
+          border:2px solid white;"
+          class="${hasHigh?'pulse':''}"></div>
+        <div style="
+          position:absolute;top:20px;white-space:nowrap;
+          background:white;padding:1px 4px;
+          font-size:11px;border-radius:3px;border:1px solid #ccc;color:#333;">
+          ${key}
+        </div>`;
+    const icon = L.divIcon({className:'',html:iconHtml});
+    if(portMarkers[key]) map.removeLayer(portMarkers[key]);
+    portMarkers[key]=L.marker(coords,{icon}).addTo(map)
+      .on("click",()=>{
+        currentFilter=key;
+        renderTable();
+        if(activeRoute){map.removeLayer(activeRoute);activeRoute=null;}
+        hideAlert();
+        // Removed map.setView(coords, 4); → No zoom on click
+      });
+  });
+}
+
+function renderTable(){
+  let html="";
+  let filtered=tankers.slice();
+  const sortVal = document.getElementById("sortSelect").value;
+  if(sortVal==="asc") filtered.sort((a,b)=>a.temp-b.temp);
+  if(sortVal==="desc") filtered.sort((a,b)=>b.temp-a.temp);
+  const filterDest = document.getElementById("filterSelect").value;
+  if(filterDest) filtered = filtered.filter(t=>t.to===filterDest);
+  if(currentFilter) filtered=filtered.filter(t=>t.from===currentFilter);
+  filtered.forEach(t=>{
+    const isHigh=t.temp>=50;
+    const badgeClass = isHigh?"badge-high":t.temp>=45?"badge-warn":"badge-normal";
+    html+=`
+    <tr style="cursor:pointer;" onclick="selectTanker('${t.id}')">
+      <td>${t.id}</td>
+      <td>${t.from}</td>
+      <td>${t.to}</td>
+      <td>
+        <span class="badge badge-temp ${badgeClass}">${t.temp.toFixed(1)}°C</span>
+      </td>
+    </tr>`;
+  });
+  document.getElementById("tankerTable").innerHTML=html;
+  document.getElementById("tableTitle").textContent=currentFilter?`Tankers from ${currentFilter}`:"All Tankers";
+}
+
+function showPopup(t) {
+  const heatingButton = `<button id="heatingTogglePopup" class="btn btn-${t.heating ? 'danger' : 'success'} btn-sm mb-2">
+    Turn ${t.heating ? 'Off' : 'On'} Heating
+  </button>`;
+
+  const html = `
+    <div style="min-width:220px;">
+      ${heatingButton}
+      <p class="mb-1"><strong>Temperature:</strong> ${t.temp.toFixed(1)}°C</p>
+      <p class="mb-2"><strong>Heating:</strong> <span id="heatingStatusPopup">${t.heating ? 'On' : 'Off'}</span></p>
+      <h6 class="mt-2">Recommended Actions</h6>
+      <ul class="list-unstyled mb-0">
+        <li>• Reduce heating</li>
+        <li>• Activate backup cooling</li>
+        <li>• Inspect insulation</li>
+        <li>• Verify sensors</li>
+        <li>• Notify maintenance</li>
+      </ul>
+    </div>`;
+
+  const latlng = t.path[t.path.length - 1];
+
+  L.popup({ maxWidth: 300, autoPan: true })
+    .setLatLng(latlng)
+    .setContent(html)
+    .openOn(map);
+
+  setTimeout(() => {
+    const toggle = document.getElementById("heatingTogglePopup");
+    toggle.addEventListener("click", () => {
+      t.heating = !t.heating;
+      document.getElementById("heatingStatusPopup").textContent = t.heating ? 'On' : 'Off';
+      toggle.textContent = `Turn ${t.heating ? 'Off' : 'On'} Heating`;
+      toggle.className = `btn btn-${t.heating ? 'danger' : 'success'} btn-sm mb-2`;
+    });
+  }, 0);
+}
+
+function selectTanker(id){
+  const t = tankers.find(x=>x.id===id);
+  selectedId=id;
+  if(activeRoute){map.removeLayer(activeRoute);activeRoute=null;}
+  activeRoute=L.polyline.antPath(t.path,{
+    "paused":false,
+    "reverse":false,
+    "delay":400,
+    "dashArray":[10,20],
+    "weight":3,
+    "color":t.temp>=50?"#dc3545":"#0d6efd",
+    "pulseColor":"#6f42c1"
+  }).addTo(map);
+  t.temp>=50 && !reviewedIds.has(t.id)?showAlert(t):hideAlert();
+  showPopup(t);
+  showModal(t);  // Optional: keep if you want both modal + popup
+}
+
+function showModal(t){
+  const modalLabel = document.getElementById("tankModalLabel");
+  modalLabel.textContent = `Tanker ${t.id} Details`;
+  const modalBody = document.getElementById("tankModalBody");
+  const heatingButton = `<button id="heatingToggle" class="btn btn-${t.heating?'danger':'success'} btn-sm mb-2">
+    Turn ${t.heating ? 'Off' : 'On'} Heating
+  </button>`;
+  modalBody.innerHTML = `
+    ${heatingButton}
+    <p><strong>Temperature:</strong> ${t.temp.toFixed(1)}°C</p>
+    <p><strong>Heating:</strong> <span id="heatingStatus">${t.heating ? 'On' : 'Off'}</span></p>
+    <ul>
+      <li>Reduce heating</li>
+      <li>Activate backup cooling</li>
+      <li>Inspect insulation</li>
+      <li>Verify sensors</li>
+      <li>Notify maintenance</li>
+    </ul>`;
+  const modal = new bootstrap.Modal(document.getElementById('tankModal'));
+  modal.show();
+  document.getElementById("heatingToggle").addEventListener("click", () => {
+    t.heating = !t.heating;
+    document.getElementById("heatingStatus").textContent = t.heating ? 'On' : 'Off';
+    document.getElementById("heatingToggle").textContent = `Turn ${t.heating ? 'Off' : 'On'} Heating`;
+    document.getElementById("heatingToggle").className = `btn btn-${t.heating ? 'danger' : 'success'} btn-sm mb-2`;
+  });
+}
+
+function hideAlert(){document.getElementById("alertSection").style.display="none";}
+function showAlert(t){
+  document.getElementById("alertSection").style.display="block";
+  document.getElementById("alertMessage").textContent=`Tanker ${t.id} temperature is ${t.temp.toFixed(1)}°C!`;
+}
+function markReviewed(){
+  if(selectedId) reviewedIds.add(selectedId);
+  hideAlert();
+  updateAlertBell();
+}
+function updateAlertBell(){
+  const unreviewed = tankers.filter(t => t.temp >= 50 && !reviewedIds.has(t.id));
+  const count = unreviewed.length;
+  const countSpan = document.getElementById("alertCount");
+  countSpan.textContent = count;
+  countSpan.style.display = count > 0 ? "inline-block" : "none";
+}
+function showPendingAlerts(){
+  if(activeRoute){map.removeLayer(activeRoute);activeRoute=null;}
+  currentFilter=null;
+  document.getElementById("filterSelect").value="";
+  renderTable();
+  let unreviewed = tankers.find(t=>t.temp>=50 && !reviewedIds.has(t.id));
+  if(unreviewed){selectTanker(unreviewed.id);}
+}
+function simulateTemps(){
+  tankers.forEach(t=>{
+    t.temp += (Math.random()-0.5)*2;
+    t.history.push(parseFloat(t.temp.toFixed(1)));
+    if(t.history.length > 10) t.history.shift();
+    if(t.temp>=50 && !reviewedIds.has(t.id)){
+      showAlert(t);
+      const log = document.createElement("li");
+      log.textContent = `${t.id} exceeded 50°C at ${new Date().toLocaleTimeString()}`;
+      document.getElementById("alertLog").appendChild(log);
+      document.getElementById("alertSound").play();
+    }
+  });
+  renderTable();
+  updatePortMarkers();
+  updateAlertBell();
+}
+
+document.getElementById("sortSelect").addEventListener("change", renderTable);
+document.getElementById("filterSelect").addEventListener("change", renderTable);
+renderTable();
+updatePortMarkers();
+updateAlertBell();
+setInterval(simulateTemps,5000);
+</script>
+</body>
+</html>
