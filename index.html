@@ -64,9 +64,27 @@
   .badge-normal { background-color: #0d6efd; }
   .badge-warn { background-color: #fd7e14; }
   .badge-high { background-color: #dc3545; }
-  .bg-light-subtle {
-  background-color: #f9f9fb;
-}
+  .badge.text-bg-danger {
+    background-color: #dc3545 !important;
+    color: #fff;
+  }
+  .badge.text-bg-warning {
+    background-color: #fd7e14 !important;
+    color: #000;
+  }
+  .badge.text-bg-success {
+    background-color: #198754 !important;
+    color: #fff;
+  }
+  .badge.text-bg-unknown {
+    background-color: #6c757d !important;
+    color: #fff;
+  }
+  @media (max-width: 768px) {
+    .modal-body p, .modal-body ul {
+      font-size: 0.9rem;
+    }
+  }
 </style>
 </head>
 <body>
@@ -103,6 +121,11 @@
             </select>
           </div>
         </div>
+        <div class="form-check d-flex align-items-center gap-2">
+  <input type="checkbox" id="autoRefresh" class="form-check-input" checked>
+  <label class="form-check-label" for="autoRefresh">Auto Refresh</label>
+  <span id="refreshTimer" class="small text-muted">Next: 5s</span>
+</div>
         <table class="table table-hover">
           <thead class="table-light sticky-top">
             <tr><th>ID</th><th>From</th><th>To</th><th>Temp</th></tr>
@@ -147,43 +170,51 @@ const ports = {
 };
 
 let tankers = [];
+let chemicalAI = {};
 let activeRoute = null;
 let portMarkers = {};
 let currentFilter = null;
 let selectedId = null;
 let reviewedIds = new Set();
- const aiAdviceMap = {
-  "Ammonia": {
-    safe: "Stable. No action needed.",
-    warning: "Monitor temperature rise closely.",
-    danger: "Risk of vapor expansion. Reduce heating immediately."
-  },
-  "Benzene": {
-    safe: "Safe condition.",
-    warning: "Ventilate area and monitor sensors.",
-    danger: "Flammable state. Shut down heating and alert crew."
-  },
-  "Methanol": {
-    safe: "Normal range.",
-    warning: "Rising temp may cause vapor buildup.",
-    danger: "Explosion risk. Initiate emergency cooling now!"
+
+const map = L.map("map").setView([20, 0], 2);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+
+// Fetch both tankers and chemical rules
+Promise.all([
+  fetch('https://api.jsonbin.io/v3/b/686e442641e5ad77b37aaf13/latest').then(res => res.json()),
+  fetch('https://api.jsonbin.io/v3/b/686e5a1e77690248e158a8e7/latest').then(res => res.json())
+]).then(([tankerData, chemData]) => {
+  tankers = tankerData.record;
+  chemicalAI = chemData.record;
+  renderTable();
+  updatePortMarkers();
+  updateAlertBell();
+  let countdown = 5;
+setInterval(() => {
+  const checkbox = document.getElementById("autoRefresh");
+  if (checkbox?.checked) {
+    countdown--;
+    if (countdown <= 0) {
+      simulateTemps();
+      countdown = 5;
+    }
   }
-};
+  document.getElementById("refreshTimer").textContent = `Next: ${countdown}s`;
+}, 1000);
+}).catch(err => console.error("Failed to load data:", err));
 
-fetch('https://api.jsonbin.io/v3/b/686e442641e5ad77b37aaf13/latest')
-  .then(res => res.json())
-  .then(json => {
-    tankers = json.record; // Important: your data is under 'record'
-    renderTable();
-    updatePortMarkers();
-    updateAlertBell();
-    setInterval(simulateTemps, 5000); // Start simulation
-  })
-  .catch(err => {
-    console.error("Failed to load tanker data:", err);
-    alert("Error loading tanker data.");
-  });
+// --- AI Logic from JSON ---
+function detectChemicalRisk(chemical, temp) {
+  const rules = chemicalAI[chemical];
+  if (!rules) return { level: "unknown", action: "No rule found." };
+  const levels = rules.riskLevels;
+  if (temp <= levels.safe.maxTemp) return { level: "safe", ...levels.safe };
+  if (temp <= levels.warning.maxTemp) return { level: "warning", ...levels.warning };
+  return { level: "danger", ...levels.danger };
+}
 
+// --- UI Functions ---
 function updatePortMarkers() {
   Object.entries(ports).forEach(([key, coords]) => {
     const hasHigh = tankers.some(t => t.from === key && t.temp >= 50);
@@ -194,6 +225,7 @@ function updatePortMarkers() {
     const icon = L.divIcon({ className: '', html: iconHtml });
     if (portMarkers[key]) map.removeLayer(portMarkers[key]);
     portMarkers[key] = L.marker(coords, { icon }).addTo(map)
+    
       .on("click", () => {
         currentFilter = key;
         renderTable();
@@ -220,7 +252,8 @@ function renderTable() {
       <td>${t.id}</td>
       <td>${t.from}</td>
       <td>${t.to}</td>
-      <td><span class="badge badge-temp ${badgeClass}">${t.temp.toFixed(1)}°C</span></td>
+      <td><span class="badge badge-temp ${badgeClass}">${t.temp.toFixed(1)}°C</span>
+<canvas id="spark-${t.id}" width="80" height="20"></canvas>
     </tr>`;
   });
   document.getElementById("tankerTable").innerHTML = html;
@@ -238,39 +271,7 @@ function selectTanker(id) {
     pulseColor: "#6f42c1"
   }).addTo(map);
   t.temp >= 50 && !reviewedIds.has(t.id) ? showAlert(t) : hideAlert();
-  showPopup(t);
   showModal(t);
-}
-
-function showPopup(t) {
-  const heatingButton = `<button id="heatingTogglePopup" class="btn btn-${t.heating ? 'danger' : 'success'} btn-sm mb-2">
-    Turn ${t.heating ? 'Off' : 'On'} Heating
-  </button>`;
-  const html = `
-    <div style="min-width:220px;">
-      ${heatingButton}
-      <p class="mb-1"><strong>Temperature:</strong> ${t.temp.toFixed(1)}°C</p>
-      <p class="mb-2"><strong>Heating:</strong> <span id="heatingStatusPopup">${t.heating ? 'On' : 'Off'}</span></p>
-      <h6 class="mt-2">Recommended Actions</h6>
-      <ul class="list-unstyled mb-0">
-        <li>• Reduce heating</li>
-        <li>• Activate backup cooling</li>
-        <li>• Inspect insulation</li>
-        <li>• Verify sensors</li>
-        <li>• Notify maintenance</li>
-      </ul>
-    </div>`;
-  const latlng = t.path[t.path.length - 1];
-  L.popup({ maxWidth: 300, autoPan: true }).setLatLng(latlng).setContent(html).openOn(map);
-  setTimeout(() => {
-    const toggle = document.getElementById("heatingTogglePopup");
-    toggle.addEventListener("click", () => {
-      t.heating = !t.heating;
-      document.getElementById("heatingStatusPopup").textContent = t.heating ? 'On' : 'Off';
-      toggle.textContent = `Turn ${t.heating ? 'Off' : 'On'} Heating`;
-      toggle.className = `btn btn-${t.heating ? 'danger' : 'success'} btn-sm mb-2`;
-    });
-  }, 0);
 }
 
 function showModal(t) {
@@ -283,37 +284,23 @@ function showModal(t) {
   modalBody.innerHTML = `
     ${heatingButton}
     <p><strong>Temperature:</strong> ${t.temp.toFixed(1)}°C</p>
-    <p><strong>Heating:</strong> <span id="heatingStatus">${t.heating ? 'On' : 'Off'}</span></p>
-    <ul>
-      <li>Reduce heating</li>
-      <li>Activate backup cooling</li>
-      <li>Inspect insulation</li>
-      <li>Verify sensors</li>
-      <li>Notify maintenance</li>
-    </ul>`;
+    <p><strong>Heating:</strong> <span id="heatingStatus">${t.heating ? 'On' : 'Off'}</span></p>`;
+
   const chem = t.chemical || "Unknown";
-const level = t.temp >= 50 ? "danger" : t.temp >= 45 ? "warning" : "safe";
-const advice = aiAdviceMap[chem]?.[level] || "No advice available.";
+  const result = detectChemicalRisk(chem, t.temp);
+  const aiTip = chemicalAI[chem]?.aiTip || "No tip available.";
 
-const label = level === "danger" ? "🚨 Danger" :
-              level === "warning" ? "⚠️ Warning" : "✅ Safe";
-const alertClass = level === "danger" ? "danger" : level === "warning" ? "warning" : "info";
+  modalBody.innerHTML += `
+    <hr>
+    <div class="alert alert-${result.level}">
+      <h6>🧪 AI Risk Level: ${result.level.toUpperCase()}</h6>
+      <p><strong>Action:</strong> ${result.action}</p>
+      <p><strong>AI Tip:</strong> <em>${aiTip}</em></p>
+    </div>`;
 
-modalBody.innerHTML += `
-  <hr>
-  <div class="p-3 border border-${alertClass} rounded bg-light-subtle">
-    <h6 class="text-${alertClass} fw-bold mb-1">🤖 AI Detection Result</h6>
-    <p class="mb-1"><strong>Risk Level:</strong> <span class="text-${alertClass}">${label}</span></p>
-    <p class="mb-2"><strong>Chemical:</strong> ${chem}</p>
-    <p class="mb-2"><strong>Condition:</strong> ${advice}</p>
-    <ul class="mb-0 small">
-      <li>📌 Monitor for sensor anomalies</li>
-      <li>🛠️ Follow SOP for temperature control</li>
-      <li>📢 Notify operations if above 50°C</li>
-    </ul>
-  </div>`;
   const modal = new bootstrap.Modal(document.getElementById('tankModal'));
   modal.show();
+
   document.getElementById("heatingToggle").addEventListener("click", () => {
     t.heating = !t.heating;
     document.getElementById("heatingStatus").textContent = t.heating ? 'On' : 'Off';
@@ -322,6 +309,7 @@ modalBody.innerHTML += `
   });
 }
 
+// --- Alerts ---
 function hideAlert() {
   document.getElementById("alertSection").style.display = "none";
 }
@@ -350,6 +338,7 @@ function showPendingAlerts() {
   if (unreviewed) { selectTanker(unreviewed.id); }
 }
 
+// --- Simulation ---
 function simulateTemps() {
   tankers.forEach(t => {
     t.temp += (Math.random() - 0.5) * 2;
@@ -368,117 +357,9 @@ function simulateTemps() {
   updateAlertBell();
 }
 
-const map = L.map("map").setView([20, 0], 2);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
-
+// --- Listeners ---
 document.getElementById("sortSelect").addEventListener("change", renderTable);
 document.getElementById("filterSelect").addEventListener("change", renderTable);
-</script>
-  <script>
-const aiAdviceMap = {
-  "Ammonia": {
-    safe: "Stable. No action needed.",
-    warning: "Monitor temperature rise closely.",
-    danger: "Risk of vapor expansion. Reduce heating immediately."
-  },
-  "Benzene": {
-    safe: "Safe condition.",
-    warning: "Ventilate area and monitor sensors.",
-    danger: "Flammable state. Shut down heating and alert crew."
-  },
-  "Methanol": {
-    safe: "Normal range.",
-    warning: "Rising temp may cause vapor buildup.",
-    danger: "Explosion risk. Initiate emergency cooling now!"
-  }
-};
-
-function calculateRiskLevel(t) {
-  const latest = t.temp;
-  const previous = t.history.slice(-2)[0] || latest;
-  const delta = latest - previous;
-  const highRiskChemicals = ["Methanol", "Ammonia"];
-  const fastRising = delta >= 1.5;
-  if (latest >= 50 || (fastRising && highRiskChemicals.includes(t.chemical))) return "danger";
-  if (latest >= 45 || fastRising) return "warning";
-  return "safe";
-}
-
-function suggestAction(t, level) {
-  if (level === "danger") return "Shut down heating and trigger emergency cooling.";
-  if (level === "warning") return "Reduce heating, monitor every 2 minutes.";
-  return "Maintain monitoring schedule.";
-}
-
-function isEscalating(t) {
-  const h = t.history.slice(-3);
-  return h.length === 3 && h[0] < h[1] && h[1] < h[2];
-}
-
-function showModal(t) {
-  const modalLabel = document.getElementById("tankModalLabel");
-  modalLabel.textContent = `Tanker ${t.id} Details`;
-
-  const modalBody = document.getElementById("tankModalBody");
-
-  const heatingButton = `<button id="heatingToggle" class="btn btn-${t.heating ? 'danger' : 'success'} btn-sm mb-2">
-    Turn ${t.heating ? 'Off' : 'On'} Heating
-  </button>`;
-
-  modalBody.innerHTML = `
-    ${heatingButton}
-    <p><strong>Temperature:</strong> ${t.temp.toFixed(1)}°C</p>
-    <p><strong>Heating:</strong> <span id="heatingStatus">${t.heating ? 'On' : 'Off'}</span></p>
-    <ul>
-      <li>Reduce heating</li>
-      <li>Activate backup cooling</li>
-      <li>Inspect insulation</li>
-      <li>Verify sensors</li>
-      <li>Notify maintenance</li>
-    </ul>`;
-
-  const chem = t.chemical || "Unknown";
-  const level = calculateRiskLevel(t);
-  const advice = aiAdviceMap[chem]?.[level] || "No advice available.";
-  const alertClass = level;
-
-  modalBody.innerHTML += `
-    <hr>
-    <div class="alert alert-${alertClass}">
-      <strong>🤖 Smart Summary:</strong><br>
-      Chemical <strong>${chem}</strong> is currently at <strong>${t.temp.toFixed(1)}°C</strong>.<br>
-      ${level === 'danger' ? '🔥 Critical alert! Immediate action required.' :
-        level === 'warning' ? '⚠️ Condition escalating. Prepare response.' :
-        '✅ System stable.'}
-    </div>
-    <p><strong>🛠 AI Suggestion:</strong> ${suggestAction(t, level)}</p>
-  `;
-
-  if (isEscalating(t)) {
-    modalBody.innerHTML += `<div class="alert alert-warning">📈 Temperature trend is rising. AI suspects ongoing escalation.</div>`;
-  }
-
-  modalBody.innerHTML += `
-    <div class="mt-2 small text-muted">
-      <strong>🧠 AI Reasoning:</strong> ${
-        level === 'danger'
-          ? 'Temperature exceeds 50°C or rapid increase on a volatile chemical.'
-          : level === 'warning'
-          ? 'Fast temp rise or nearing risk zone.'
-          : 'Stable trend and safe range.'
-      }
-    </div>`;
-
-  const modal = new bootstrap.Modal(document.getElementById('tankModal'));
-  modal.show();
-
-  document.getElementById("heatingToggle").addEventListener("click", () => {
-    t.heating = !t.heating;
-    document.getElementById("heatingStatus").textContent = t.heating ? 'On' : 'Off';
-    document.getElementById("heatingToggle").textContent = `Turn ${t.heating ? 'Off' : 'On'} Heating`;
-    document.getElementById("heatingToggle").className = `btn btn-${t.heating ? 'danger' : 'success'} btn-sm mb-2`;
-  });
-}
 </script>
 </body>
 </html>
