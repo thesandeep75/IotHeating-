@@ -143,108 +143,106 @@ const ports = {
   shanghai: [31.23, 121.47]
 };
 
-let tankers = [
-  // Houston
-  {id:"H001", from:"houston", to:"rotterdam", temp:35, heating:true, history:[35], path:[[29.76,-95.36],[40,-40],[51.92,4.47]]},
-  {id:"H002", from:"houston", to:"singapore", temp:37, heating:true, history:[37], path:[[29.76,-95.36],[10,40],[1.35,103.82]]},
-  {id:"H003", from:"houston", to:"mumbai", temp:36, heating:true, history:[36], path:[[29.76,-95.36],[15,20],[19.07,72.87]]},
-  {id:"H004", from:"houston", to:"shanghai", temp:38, heating:true, history:[38], path:[[29.76,-95.36],[25,80],[31.23,121.47]]},
- 
-  // Rotterdam
-  {id:"R001", from:"rotterdam", to:"houston", temp:40, heating:true, history:[40], path:[[51.92,4.47],[40,-40],[29.76,-95.36]]},
-  {id:"R002", from:"rotterdam", to:"singapore", temp:42, heating:true, history:[42], path:[[51.92,4.47],[20,40],[1.35,103.82]]},
-  {id:"R003", from:"rotterdam", to:"mumbai", temp:45, heating:true, history:[45], path:[[51.92,4.47],[30,20],[19.07,72.87]]},
-  {id:"R004", from:"rotterdam", to:"shanghai", temp:44, heating:true, history:[44], path:[[51.92,4.47],[35,80],[31.23,121.47]]},
- 
-  // Mumbai
-  {id:"M001", from:"mumbai", to:"houston", temp:50, heating:true, history:[50], path:[[19.07,72.87],[0,0],[29.76,-95.36]]},
-  {id:"M002", from:"mumbai", to:"rotterdam", temp:48, heating:true, history:[48], path:[[19.07,72.87],[20,20],[51.92,4.47]]},
-  {id:"M003", from:"mumbai", to:"singapore", temp:46, heating:true, history:[46], path:[[19.07,72.87],[10,40],[1.35,103.82]]},
-  {id:"M004", from:"mumbai", to:"shanghai", temp:47, heating:true, history:[47], path:[[19.07,72.87],[20,110],[31.23,121.47]]},
- 
-  // Singapore
-  {id:"S001", from:"singapore", to:"houston", temp:39, heating:true, history:[39], path:[[1.35,103.82],[10,0],[29.76,-95.36]]},
-  {id:"S002", from:"singapore", to:"rotterdam", temp:41, heating:true, history:[41], path:[[1.35,103.82],[20,20],[51.92,4.47]]},
-  {id:"S003", from:"singapore", to:"mumbai", temp:43, heating:true, history:[43], path:[[1.35,103.82],[15,30],[19.07,72.87]]},
-  {id:"S004", from:"singapore", to:"shanghai", temp:38, heating:true, history:[38], path:[[1.35,103.82],[20,110],[31.23,121.47]]},
- 
-  // Shanghai
-  {id:"SH001", from:"shanghai", to:"houston", temp:36, heating:true, history:[36], path:[[31.23,121.47],[20,0],[29.76,-95.36]]},
-  {id:"SH002", from:"shanghai", to:"rotterdam", temp:39, heating:true, history:[39], path:[[31.23,121.47],[20,20],[51.92,4.47]]},
-  {id:"SH003", from:"shanghai", to:"mumbai", temp:41, heating:true, history:[41], path:[[31.23,121.47],[25,30],[19.07,72.87]]},
-  {id:"SH004", from:"shanghai", to:"singapore", temp:37, heating:true, history:[37], path:[[31.23,121.47],[25,50],[1.35,103.82]]}
-];
- 
-
-let map = L.map("map").setView([20,0],2);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
-
+let tankers = [];
 let activeRoute = null;
 let portMarkers = {};
 let currentFilter = null;
 let selectedId = null;
 let reviewedIds = new Set();
+ const aiAdviceMap = {
+  "Ammonia": {
+    safe: "Stable. No action needed.",
+    warning: "Monitor temperature rise closely.",
+    danger: "Risk of vapor expansion. Reduce heating immediately."
+  },
+  "Benzene": {
+    safe: "Safe condition.",
+    warning: "Ventilate area and monitor sensors.",
+    danger: "Flammable state. Shut down heating and alert crew."
+  },
+  "Methanol": {
+    safe: "Normal range.",
+    warning: "Rising temp may cause vapor buildup.",
+    danger: "Explosion risk. Initiate emergency cooling now!"
+  }
+};
 
-function updatePortMarkers(){
-  Object.entries(ports).forEach(([key,coords])=>{
-    const hasHigh = tankers.some(t=>t.from===key && t.temp>=50);
+fetch('https://api.jsonbin.io/v3/b/686e442641e5ad77b37aaf13/latest')
+  .then(res => res.json())
+  .then(json => {
+    tankers = json.record; // Important: your data is under 'record'
+    renderTable();
+    updatePortMarkers();
+    updateAlertBell();
+    setInterval(simulateTemps, 5000); // Start simulation
+  })
+  .catch(err => {
+    console.error("Failed to load tanker data:", err);
+    alert("Error loading tanker data.");
+  });
+
+function updatePortMarkers() {
+  Object.entries(ports).forEach(([key, coords]) => {
+    const hasHigh = tankers.some(t => t.from === key && t.temp >= 50);
     const iconHtml = `
       <div style="position:relative;display:flex;align-items:center;justify-content:center;">
-        <div style="
-          background-color:${hasHigh?'#dc3545':'#0d6efd'};
-          width:16px;height:16px;border-radius:50%;
-          border:2px solid white;"
-          class="${hasHigh?'pulse':''}"></div>
-        <div style="
-          position:absolute;top:20px;white-space:nowrap;
-          background:white;padding:1px 4px;
-          font-size:11px;border-radius:3px;border:1px solid #ccc;color:#333;">
-          ${key}
-        </div>`;
-    const icon = L.divIcon({className:'',html:iconHtml});
-    if(portMarkers[key]) map.removeLayer(portMarkers[key]);
-    portMarkers[key]=L.marker(coords,{icon}).addTo(map)
-      .on("click",()=>{
-        currentFilter=key;
+        <div style="background-color:${hasHigh ? '#dc3545' : '#0d6efd'};width:16px;height:16px;border-radius:50%;border:2px solid white;" class="${hasHigh ? 'pulse' : ''}"></div>
+        <div style="position:absolute;top:20px;white-space:nowrap;background:white;padding:1px 4px;font-size:11px;border-radius:3px;border:1px solid #ccc;color:#333;">${key}</div>`;
+    const icon = L.divIcon({ className: '', html: iconHtml });
+    if (portMarkers[key]) map.removeLayer(portMarkers[key]);
+    portMarkers[key] = L.marker(coords, { icon }).addTo(map)
+      .on("click", () => {
+        currentFilter = key;
         renderTable();
-        if(activeRoute){map.removeLayer(activeRoute);activeRoute=null;}
+        if (activeRoute) { map.removeLayer(activeRoute); activeRoute = null; }
         hideAlert();
-        // Removed map.setView(coords, 4); → No zoom on click
       });
   });
 }
 
-function renderTable(){
-  let html="";
-  let filtered=tankers.slice();
+function renderTable() {
+  let html = "";
+  let filtered = tankers.slice();
   const sortVal = document.getElementById("sortSelect").value;
-  if(sortVal==="asc") filtered.sort((a,b)=>a.temp-b.temp);
-  if(sortVal==="desc") filtered.sort((a,b)=>b.temp-a.temp);
+  if (sortVal === "asc") filtered.sort((a, b) => a.temp - b.temp);
+  if (sortVal === "desc") filtered.sort((a, b) => b.temp - a.temp);
   const filterDest = document.getElementById("filterSelect").value;
-  if(filterDest) filtered = filtered.filter(t=>t.to===filterDest);
-  if(currentFilter) filtered=filtered.filter(t=>t.from===currentFilter);
-  filtered.forEach(t=>{
-    const isHigh=t.temp>=50;
-    const badgeClass = isHigh?"badge-high":t.temp>=45?"badge-warn":"badge-normal";
-    html+=`
+  if (filterDest) filtered = filtered.filter(t => t.to === filterDest);
+  if (currentFilter) filtered = filtered.filter(t => t.from === currentFilter);
+  filtered.forEach(t => {
+    const isHigh = t.temp >= 50;
+    const badgeClass = isHigh ? "badge-high" : t.temp >= 45 ? "badge-warn" : "badge-normal";
+    html += `
     <tr style="cursor:pointer;" onclick="selectTanker('${t.id}')">
       <td>${t.id}</td>
       <td>${t.from}</td>
       <td>${t.to}</td>
-      <td>
-        <span class="badge badge-temp ${badgeClass}">${t.temp.toFixed(1)}°C</span>
-      </td>
+      <td><span class="badge badge-temp ${badgeClass}">${t.temp.toFixed(1)}°C</span></td>
     </tr>`;
   });
-  document.getElementById("tankerTable").innerHTML=html;
-  document.getElementById("tableTitle").textContent=currentFilter?`Tankers from ${currentFilter}`:"All Tankers";
+  document.getElementById("tankerTable").innerHTML = html;
+  document.getElementById("tableTitle").textContent = currentFilter ? `Tankers from ${currentFilter}` : "All Tankers";
+}
+
+function selectTanker(id) {
+  const t = tankers.find(x => x.id === id);
+  selectedId = id;
+  if (activeRoute) { map.removeLayer(activeRoute); activeRoute = null; }
+  activeRoute = L.polyline.antPath(t.path, {
+    paused: false, reverse: false, delay: 400,
+    dashArray: [10, 20], weight: 3,
+    color: t.temp >= 50 ? "#dc3545" : "#0d6efd",
+    pulseColor: "#6f42c1"
+  }).addTo(map);
+  t.temp >= 50 && !reviewedIds.has(t.id) ? showAlert(t) : hideAlert();
+  showPopup(t);
+  showModal(t);
 }
 
 function showPopup(t) {
   const heatingButton = `<button id="heatingTogglePopup" class="btn btn-${t.heating ? 'danger' : 'success'} btn-sm mb-2">
     Turn ${t.heating ? 'Off' : 'On'} Heating
   </button>`;
-
   const html = `
     <div style="min-width:220px;">
       ${heatingButton}
@@ -259,14 +257,8 @@ function showPopup(t) {
         <li>• Notify maintenance</li>
       </ul>
     </div>`;
-
   const latlng = t.path[t.path.length - 1];
-
-  L.popup({ maxWidth: 300, autoPan: true })
-    .setLatLng(latlng)
-    .setContent(html)
-    .openOn(map);
-
+  L.popup({ maxWidth: 300, autoPan: true }).setLatLng(latlng).setContent(html).openOn(map);
   setTimeout(() => {
     const toggle = document.getElementById("heatingTogglePopup");
     toggle.addEventListener("click", () => {
@@ -278,29 +270,11 @@ function showPopup(t) {
   }, 0);
 }
 
-function selectTanker(id){
-  const t = tankers.find(x=>x.id===id);
-  selectedId=id;
-  if(activeRoute){map.removeLayer(activeRoute);activeRoute=null;}
-  activeRoute=L.polyline.antPath(t.path,{
-    "paused":false,
-    "reverse":false,
-    "delay":400,
-    "dashArray":[10,20],
-    "weight":3,
-    "color":t.temp>=50?"#dc3545":"#0d6efd",
-    "pulseColor":"#6f42c1"
-  }).addTo(map);
-  t.temp>=50 && !reviewedIds.has(t.id)?showAlert(t):hideAlert();
-  showPopup(t);
-  showModal(t);  // Optional: keep if you want both modal + popup
-}
-
-function showModal(t){
+function showModal(t) {
   const modalLabel = document.getElementById("tankModalLabel");
   modalLabel.textContent = `Tanker ${t.id} Details`;
   const modalBody = document.getElementById("tankModalBody");
-  const heatingButton = `<button id="heatingToggle" class="btn btn-${t.heating?'danger':'success'} btn-sm mb-2">
+  const heatingButton = `<button id="heatingToggle" class="btn btn-${t.heating ? 'danger' : 'success'} btn-sm mb-2">
     Turn ${t.heating ? 'Off' : 'On'} Heating
   </button>`;
   modalBody.innerHTML = `
@@ -314,6 +288,17 @@ function showModal(t){
       <li>Verify sensors</li>
       <li>Notify maintenance</li>
     </ul>`;
+  const chem = t.chemical || "Unknown";
+const level = t.temp >= 50 ? "danger" : t.temp >= 45 ? "warning" : "safe";
+const advice = aiAdviceMap[chem]?.[level] || "No advice available.";
+
+modalBody.innerHTML += `
+  <hr>
+  <h6>🤖 AI Detection</h6>
+  <p><strong>Chemical:</strong> ${chem}</p>
+  <div class="alert alert-${level === 'danger' ? 'danger' : level === 'warning' ? 'warning' : 'info'}">
+    ${advice}
+  </div>`;
   const modal = new bootstrap.Modal(document.getElementById('tankModal'));
   modal.show();
   document.getElementById("heatingToggle").addEventListener("click", () => {
@@ -324,37 +309,40 @@ function showModal(t){
   });
 }
 
-function hideAlert(){document.getElementById("alertSection").style.display="none";}
-function showAlert(t){
-  document.getElementById("alertSection").style.display="block";
-  document.getElementById("alertMessage").textContent=`Tanker ${t.id} temperature is ${t.temp.toFixed(1)}°C!`;
+function hideAlert() {
+  document.getElementById("alertSection").style.display = "none";
 }
-function markReviewed(){
-  if(selectedId) reviewedIds.add(selectedId);
+function showAlert(t) {
+  document.getElementById("alertSection").style.display = "block";
+  document.getElementById("alertMessage").textContent = `Tanker ${t.id} temperature is ${t.temp.toFixed(1)}°C!`;
+}
+function markReviewed() {
+  if (selectedId) reviewedIds.add(selectedId);
   hideAlert();
   updateAlertBell();
 }
-function updateAlertBell(){
+function updateAlertBell() {
   const unreviewed = tankers.filter(t => t.temp >= 50 && !reviewedIds.has(t.id));
   const count = unreviewed.length;
   const countSpan = document.getElementById("alertCount");
   countSpan.textContent = count;
   countSpan.style.display = count > 0 ? "inline-block" : "none";
 }
-function showPendingAlerts(){
-  if(activeRoute){map.removeLayer(activeRoute);activeRoute=null;}
-  currentFilter=null;
-  document.getElementById("filterSelect").value="";
+function showPendingAlerts() {
+  if (activeRoute) { map.removeLayer(activeRoute); activeRoute = null; }
+  currentFilter = null;
+  document.getElementById("filterSelect").value = "";
   renderTable();
-  let unreviewed = tankers.find(t=>t.temp>=50 && !reviewedIds.has(t.id));
-  if(unreviewed){selectTanker(unreviewed.id);}
+  let unreviewed = tankers.find(t => t.temp >= 50 && !reviewedIds.has(t.id));
+  if (unreviewed) { selectTanker(unreviewed.id); }
 }
-function simulateTemps(){
-  tankers.forEach(t=>{
-    t.temp += (Math.random()-0.5)*2;
+
+function simulateTemps() {
+  tankers.forEach(t => {
+    t.temp += (Math.random() - 0.5) * 2;
     t.history.push(parseFloat(t.temp.toFixed(1)));
-    if(t.history.length > 10) t.history.shift();
-    if(t.temp>=50 && !reviewedIds.has(t.id)){
+    if (t.history.length > 10) t.history.shift();
+    if (t.temp >= 50 && !reviewedIds.has(t.id)) {
       showAlert(t);
       const log = document.createElement("li");
       log.textContent = `${t.id} exceeded 50°C at ${new Date().toLocaleTimeString()}`;
@@ -367,12 +355,11 @@ function simulateTemps(){
   updateAlertBell();
 }
 
+const map = L.map("map").setView([20, 0], 2);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+
 document.getElementById("sortSelect").addEventListener("change", renderTable);
 document.getElementById("filterSelect").addEventListener("change", renderTable);
-renderTable();
-updatePortMarkers();
-updateAlertBell();
-setInterval(simulateTemps,5000);
 </script>
 </body>
 </html>
