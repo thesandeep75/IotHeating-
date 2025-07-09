@@ -85,6 +85,21 @@
       font-size: 0.9rem;
     }
   }
+  .modal-body h6 {
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+.progress {
+  background-color: #e9ecef;
+  border-radius: 3px;
+}
+.progress-bar {
+  transition: width 0.6s ease;
+}
+.badge.bg-primary {
+  background: linear-gradient(to right, #4facfe, #00f2fe);
+  color: black;
+}
 </style>
 </head>
 <body>
@@ -128,7 +143,7 @@
 </div>
         <table class="table table-hover">
           <thead class="table-light sticky-top">
-            <tr><th>ID</th><th>From</th><th>To</th><th>Temp</th></tr>
+            <tr><th>ID</th><th>From</th><th>To</th><th>Temp</th><th>ETA/Location</th></tr>
           </thead>
           <tbody id="tankerTable"></tbody>
         </table>
@@ -171,22 +186,33 @@ const ports = {
 
 let tankers = [];
 let chemicalAI = {};
+let weatherForecast = {};
 let activeRoute = null;
 let portMarkers = {};
 let currentFilter = null;
 let selectedId = null;
 let reviewedIds = new Set();
+let liveMarker = null;
+let liveUpdateInterval = null;
+let shipTrail = null;
+let ghostMarkers = [];
+let trailCoords = [];
 
 const map = L.map("map").setView([20, 0], 2);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
-
+//L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+  attribution: 'Sandeep IoT Global map',
+  maxZoom: 18
+}).addTo(map);
 // Fetch both tankers and chemical rules
 Promise.all([
-  fetch('https://api.jsonbin.io/v3/b/686e442641e5ad77b37aaf13/latest').then(res => res.json()),
-  fetch('https://api.jsonbin.io/v3/b/686e5a1e77690248e158a8e7/latest').then(res => res.json())
-]).then(([tankerData, chemData]) => {
+  fetch('https://api.jsonbin.io/v3/b/686e442641e5ad77b37aaf13/latest').then(res => res.json()), // Tankers
+  fetch('https://api.jsonbin.io/v3/b/686e5a1e77690248e158a8e7/latest').then(res => res.json()), // Chemical AI
+  fetch('https://api.jsonbin.io/v3/b/686e8a6c77690248e158d548/latest').then(res => res.json())  // Weather Forecast
+]).then(([tankerData, chemData, weatherData]) => {
   tankers = tankerData.record;
   chemicalAI = chemData.record;
+  weatherForecast = weatherData.record;
   renderTable();
   updatePortMarkers();
   updateAlertBell();
@@ -245,17 +271,24 @@ function renderTable() {
   if (filterDest) filtered = filtered.filter(t => t.to === filterDest);
   if (currentFilter) filtered = filtered.filter(t => t.from === currentFilter);
   filtered.forEach(t => {
-    const isHigh = t.temp >= 50;
-    const badgeClass = isHigh ? "badge-high" : t.temp >= 45 ? "badge-warn" : "badge-normal";
-    html += `
+  const isHigh = t.temp >= 50;
+  const badgeClass = isHigh ? "badge-high" : t.temp >= 45 ? "badge-warn" : "badge-normal";
+
+  const row = `
     <tr style="cursor:pointer;" onclick="selectTanker('${t.id}')">
       <td>${t.id}</td>
       <td>${t.from}</td>
       <td>${t.to}</td>
-      <td><span class="badge badge-temp ${badgeClass}">${t.temp.toFixed(1)}°C</span>
-<canvas id="spark-${t.id}" width="80" height="20"></canvas>
-    </tr>`;
-  });
+      <td><span class="badge badge-temp ${badgeClass}">${t.temp.toFixed(1)}°C</span></td>
+      <td>
+        <button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); showLiveMarkerForTanker('${t.id}')">
+          📍 Live Location
+        </button>
+      </td>
+    </tr>
+  `;
+  html += row;
+});
   document.getElementById("tankerTable").innerHTML = html;
   document.getElementById("tableTitle").textContent = currentFilter ? `Tankers from ${currentFilter}` : "All Tankers";
 }
@@ -272,8 +305,30 @@ function selectTanker(id) {
   }).addTo(map);
   t.temp >= 50 && !reviewedIds.has(t.id) ? showAlert(t) : hideAlert();
   showModal(t);
+  showLiveMarkerForTanker(id);
+}
+function isTrendEscalating(t) {
+  const h = t.history.slice(-3);
+  return h.length === 3 && h[0] < h[1] && h[1] < h[2];
 }
 
+function getConfidenceScore(t) {
+  const delta = Math.abs(t.history.at(-1) - t.history.at(-2) || 0);
+  const variance = t.history.reduce((acc, val) => acc + Math.abs(val - t.temp), 0) / t.history.length;
+  const base = delta < 0.5 ? 0.9 : delta < 1 ? 0.7 : 0.5;
+  return Math.max(0.4, Math.min(1, base - variance / 10));
+}
+
+function forecastTemp(t) {
+  const recent = t.history.slice(-3);
+  const avgIncrease = (recent[2] - recent[0]) / 2;
+  return (t.temp + avgIncrease).toFixed(1);
+}
+
+function getWeatherForecastForTanker(id) {
+  return weatherForecast.find(w => w.id === id)?.forecast || null;
+}
+  
 function showModal(t) {
   const modalLabel = document.getElementById("tankModalLabel");
   modalLabel.textContent = `Tanker ${t.id} Details`;
@@ -289,14 +344,57 @@ function showModal(t) {
   const chem = t.chemical || "Unknown";
   const result = detectChemicalRisk(chem, t.temp);
   const aiTip = chemicalAI[chem]?.aiTip || "No tip available.";
+  const confidence = (getConfidenceScore(t) * 100).toFixed(0);
+  const forecast = forecastTemp(t);
+  const escalating = isTrendEscalating(t);
+  const weather = getWeatherForecastForTanker(t.id); // ← Ensure this function exists
 
-  modalBody.innerHTML += `
-    <hr>
-    <div class="alert alert-${result.level}">
-      <h6>🧪 AI Risk Level: ${result.level.toUpperCase()}</h6>
-      <p><strong>Action:</strong> ${result.action}</p>
-      <p><strong>AI Tip:</strong> <em>${aiTip}</em></p>
-    </div>`;
+modalBody.innerHTML += `
+  <hr>
+  <div class="p-3 bg-light rounded shadow-sm mb-3 border-start border-5 border-${result.level === 'danger' ? 'danger' : result.level === 'warning' ? 'warning' : 'success'}">
+    <div class="d-flex align-items-center mb-2">
+      <span class="fs-5 me-2">🧠</span>
+      <h6 class="mb-0 text-uppercase">AI Risk Analysis</h6>
+    </div>
+    <p class="mb-1"><strong>Risk Level:</strong> <span class="badge bg-${result.level === 'danger' ? 'danger' : result.level === 'warning' ? 'warning' : 'success'} text-white">${result.level.toUpperCase()}</span></p>
+    <p class="mb-1"><strong>Recommended Action:</strong> ${result.action}</p>
+    <p class="mb-0 text-muted"><em>🧠 AI Insight:</em> ${aiTip}</p>
+  </div>
+
+  <div class="p-3 bg-white rounded shadow-sm mb-3 border-start border-5 border-info">
+    <div class="d-flex align-items-center mb-2">
+      <span class="fs-5 me-2">📊</span>
+      <h6 class="mb-0 text-uppercase">AI Forecast & Confidence</h6>
+    </div>
+    <p class="mb-1"><strong>Forecasted Temp:</strong> 🌡️ ${forecast}°C</p>
+    <p class="mb-1"><strong>AI Confidence:</strong> 
+      <span class="badge bg-primary">${confidence}%</span>
+    </p>
+    <div class="progress mb-2" style="height: 6px;">
+      <div class="progress-bar bg-primary" role="progressbar" style="width: ${confidence}%" aria-valuenow="${confidence}" aria-valuemin="0" aria-valuemax="100"></div>
+    </div>
+    ${escalating 
+      ? `<p class="text-danger mb-0">📈 <strong>Trend:</strong> Escalating temperature pattern detected</p>`
+      : `<p class="text-success mb-0">📉 <strong>Trend:</strong> Stable</p>`}
+  </div>
+
+  ${weather ? `
+  <div class="p-3 bg-white rounded shadow-sm mb-1 border-start border-5 border-secondary">
+    <div class="d-flex align-items-center mb-2">
+      <span class="fs-5 me-2">🌦️</span>
+      <h6 class="mb-0 text-uppercase">Weather Forecast</h6>
+    </div>
+    <ul class="list-unstyled mb-1">
+      <li><strong>Condition:</strong> ${weather.condition}</li>
+      <li><strong>Sea State:</strong> ${weather.seaState}</li>
+      <li><strong>Wave Height:</strong> ${weather.waveHeight}</li>
+      <li><strong>Wind Speed:</strong> ${weather.windSpeed}</li>
+      <li><strong>Humidity:</strong> ${weather.humidity}</li>
+    </ul>
+    <p class="text-muted mb-0"><em>💡 AI Advice:</em> ${weather.advice}</p>
+  </div>
+  ` : ''}
+`;
 
   const modal = new bootstrap.Modal(document.getElementById('tankModal'));
   modal.show();
@@ -337,6 +435,78 @@ function showPendingAlerts() {
   let unreviewed = tankers.find(t => t.temp >= 50 && !reviewedIds.has(t.id));
   if (unreviewed) { selectTanker(unreviewed.id); }
 }
+function showLiveMarkerForTanker(id) {
+  if (liveUpdateInterval) clearInterval(liveUpdateInterval);
+  if (liveMarker) { map.removeLayer(liveMarker); liveMarker = null; }
+  if (shipTrail) { map.removeLayer(shipTrail); shipTrail = null; }
+  ghostMarkers.forEach(m => map.removeLayer(m));
+  ghostMarkers = [];
+  trailCoords = [];
+
+  function fetchAndUpdate() {
+    fetch('https://api.jsonbin.io/v3/b/686e6af55f4bcf6c3afb104c/latest')
+      .then(res => res.json())
+      .then(data => {
+        const ship = data.record.find(s => s.id === id);
+        if (!ship) return;
+
+        const latLng = [ship.lat, ship.lng];
+
+        // 🌫️ Ghost marker
+        const ghost = L.circleMarker(latLng, {
+          radius: 4,
+          color: "#0d6efd",
+          fillOpacity: 0.2,
+          opacity: 0.4
+        }).addTo(map);
+        ghostMarkers.push(ghost);
+        if (ghostMarkers.length > 10) {
+          const old = ghostMarkers.shift();
+          map.removeLayer(old);
+        }
+
+        // 🛣️ Dotted trail
+        trailCoords.push(latLng);
+        if (trailCoords.length > 1) {
+          if (shipTrail) map.removeLayer(shipTrail);
+          shipTrail = L.polyline(trailCoords, {
+            color: "#0d6efd",
+            weight: 2,
+            opacity: 0.6,
+            dashArray: "5, 8"
+          }).addTo(map);
+        }
+
+        // 🚢 Ship icon
+        const icon = L.icon({
+          iconUrl: "https://cdn-icons-png.flaticon.com/512/2329/2329187.png",
+          iconSize: [30, 30],
+          iconAnchor: [15, 15]
+        });
+
+        if (!liveMarker) {
+          liveMarker = L.marker(latLng, { icon })
+            .addTo(map)
+            .bindTooltip(`🚢 ${ship.id}<br>📍 ${ship.lat.toFixed(2)}, ${ship.lng.toFixed(2)}<br>⏱ ETA: ${ship.eta}`, {
+              direction: 'top',
+              permanent: false,
+              offset: [0, -10]
+            })
+            .openTooltip();
+          map.setView(latLng, 4);
+        } else {
+          liveMarker.setLatLng(latLng);
+          liveMarker.setTooltipContent(`🚢 ${ship.id}<br>📍 ${ship.lat.toFixed(2)}, ${ship.lng.toFixed(2)}<br>⏱ ETA: ${ship.eta}`);
+        }
+      })
+      .catch(err => console.warn("Live tracking fetch failed:", err));
+  }
+
+  fetchAndUpdate();
+  liveUpdateInterval = setInterval(fetchAndUpdate, 5000);
+}
+
+
 
 // --- Simulation ---
 function simulateTemps() {
